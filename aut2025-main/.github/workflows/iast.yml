@@ -1,0 +1,69 @@
+name: IAST
+on:
+    push:
+        branches:
+        - main
+
+jobs:
+    dast:
+        name: DAST
+        runs-on: ubuntu-latest
+        permissions: write-all
+        steps:
+            - name: Checkout the Repo
+              uses: actions/checkout@v4
+
+            - name: Create isolated network
+              run: docker network create --driver bridge isolated
+
+            - name: Deploy AUT
+              run: docker build -t my-php-site:latest .
+
+            - name: Run AUT
+              run: docker run --network=isolated -p 80:80 --name docker-apache -t -d my-php-site:latest
+
+            - name: Get AUT URL
+              run: |
+                URL=http://$(ip -f inet -o addr show docker0 | awk '{print $4}' | cut -d '/' -f 1)
+                echo "URL=$URL" >> $GITHUB_ENV
+
+            - name: Check AUT URL
+              run: curl ${{ env.URL }}
+
+            - name: ZAP SCAN
+              uses: hermanka/action-full-scan@master
+              with:
+                target: ${{ env.URL }}
+                network_name: isolated
+
+            - name: stop docker
+              run: docker stop docker-apache
+
+    sast:
+        name: Static Analysis
+        permissions: write-all
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout the Repo
+              uses: actions/checkout@v4
+
+            - name: Psalm Sec Scan
+              uses: docker://ghcr.io/psalm/psalm-security-scan
+            
+            - name: Import Psalm sec analysis result to GitHub Security Code Scanning
+              uses: github/codeql-action/upload-sarif@v2
+              with:
+                sarif_file: results.sarif
+
+            - name: sonarqube-scan
+              uses: SonarSource/sonarqube-scan-action@master
+              env:
+                SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+              with:
+                projectBaseDir: .
+                args: >
+                  -Dsonar.organization=jonscafe
+                  -Dsonar.projectKey=jonscafe_aut2025
+                  -Dsonar.sources=.
+                  -Dsonar.exclusions=**/vendor/**,**/tests/**
+                  -Dsonar.branch.name=${{ github.ref_name }}
